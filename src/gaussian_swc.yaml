@@ -1,0 +1,57 @@
+# Configuration for SWC-based neuron reconstruction
+# Uses SWC skeleton for Gaussian initialization instead of FBP
+
+# SWC-specific settings
+use_swc: true
+swc_path: /home/armin/Documents/3DGR-CT/10-2900-control-cell-05.oif-C0.v3dpbd.swc
+swc_densify: true              # Interpolate skeleton points
+swc_points_per_unit: 5.0       # Density of interpolation
+swc_radius_density: true       # Allocate more Gaussians to thicker regions
+
+# Volume and projection settings
+batch_size: 1
+data: tiff                     # Use actual TIFF image as target (not SWC-rasterized)
+img_path: /home/armin/Documents/3DGR-CT/10-2900-control-cell-05.oif-C0.v3dpbd.tif
+img_size:
+- 100
+- 650
+- 820
+
+# Gaussian initialization (some used for both modes)
+air_threshold: 0.05
+ini_intensity: 0.05            # Higher initial intensity
+ini_sigma: 0.05                # Medium-sized Gaussians for smooth blending
+start: 0.15
+num_gaussian: 30000            # Fewer Gaussians for sharper structure
+max_gaussians: 100000          # Limit max Gaussians
+
+# Training settings
+max_iter: 15000
+low_reso_stage: 3000           # Shorter low-res stage
+log_iter: 100
+val_iter: 100
+display_image_num: 8
+image_save_iter: 2000
+
+# Projection settings
+num_proj: 20
+proj_size:
+- 512
+- 800
+
+# Densification control
+do_density_control: true       # Enable densification with scale limits
+densification_interval: 100
+densify_from_iter: 500
+densify_until_iter: 12000
+max_grad: 1.0e-05
+min_intensity: 0.005
+max_scale: 0.10                # Prune Gaussians with scale > 0.10 (~80 voxels)
+sigma_extent: 2
+
+# Learning rate settings
+spatial_lr_scale: 1
+
+# Regularization
+tv_weight: 0.0
+skeleton_weight: 0.5           # MUCH STRONGER skeleton constraint to prevent drift
