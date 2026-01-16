@@ -7,7 +7,7 @@
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { 
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             background: #000;
             overflow: hidden;
         }
@@ -63,10 +63,10 @@
     <div id="loading">Loading volume data...</div>
     <canvas id="canvas"></canvas>
     <div id="info" style="display:none;">
-        <h1>🧠 3D Neuron Volume Renderer</h1>
+        <h1>3D Neuron Volume Renderer</h1>
         <p>Volume: <span class="val" id="volSize">-</span></p>
         <p>FPS: <span class="val" id="fps">-</span></p>
-        <p style="margin-top: 10px;">🖱️ Drag to rotate | Scroll to zoom</p>
+        <p style="margin-top: 10px;">Drag to rotate | Scroll to zoom</p>
     </div>
     <div id="controls" style="display:none;">
         <label>Brightness: <span id="brightnessVal">2.0</span></label>
@@ -83,233 +83,219 @@
         <button id="rotateBtn" class="active">On</button>
     </div>
 
+    <script id="vs" type="x-shader/x-vertex">#version 300 es
+in vec2 aPosition;
+out vec2 vUV;
+void main() {
+    vUV = aPosition * 0.5 + 0.5;
+    gl_Position = vec4(aPosition, 0.0, 1.0);
+}</script>
+
+    <script id="fs" type="x-shader/x-fragment">#version 300 es
+precision highp float;
+precision highp sampler3D;
+
+in vec2 vUV;
+out vec4 fragColor;
+
+uniform sampler3D uVolume;
+uniform mat3 uRotation;
+uniform float uZoom;
+uniform float uBrightness;
+uniform float uThreshold;
+uniform int uRenderMode;
+uniform vec3 uAspect;
+uniform vec2 uResolution;
+
+const int MAX_STEPS = 512;
+const float STEP_SIZE = 0.002;
+
+vec2 intersectAABB(vec3 rayOrigin, vec3 rayDir, vec3 boxMin, vec3 boxMax) {
+    vec3 tMin = (boxMin - rayOrigin) / rayDir;
+    vec3 tMax = (boxMax - rayOrigin) / rayDir;
+    vec3 t1 = min(tMin, tMax);
+    vec3 t2 = max(tMin, tMax);
+    float tNear = max(max(t1.x, t1.y), t1.z);
+    float tFar = min(min(t2.x, t2.y), t2.z);
+    return vec2(tNear, tFar);
+}
+
+void main() {
+    vec2 uv = (vUV - 0.5) * 2.0;
+    uv.x *= uResolution.x / uResolution.y;
+    
+    vec3 rayOrigin = vec3(0.0, 0.0, uZoom);
+    vec3 rayDir = normalize(vec3(uv * 0.8, -1.0));
+    
+    rayOrigin = uRotation * rayOrigin;
+    rayDir = uRotation * rayDir;
+    
+    vec3 boxMin = -uAspect * 0.5;
+    vec3 boxMax = uAspect * 0.5;
+    
+    vec2 tHit = intersectAABB(rayOrigin, rayDir, boxMin, boxMax);
+    
+    if (tHit.x > tHit.y || tHit.y < 0.0) {
+        fragColor = vec4(0.0, 0.0, 0.0, 1.0);
+        return;
+    }
+    
+    tHit.x = max(tHit.x, 0.0);
+    
+    float maxVal = 0.0;
+    float accumAlpha = 0.0;
+    float accumColor = 0.0;
+    
+    for (int i = 0; i < MAX_STEPS; i++) {
+        float t = tHit.x + float(i) * STEP_SIZE;
+        if (t > tHit.y) break;
+        
+        vec3 pos = rayOrigin + rayDir * t;
+        vec3 texCoord = (pos - boxMin) / (boxMax - boxMin);
+        float val = texture(uVolume, texCoord).r;
+        
+        val = max(0.0, val - uThreshold);
+        
+        if (uRenderMode == 0) {
+            maxVal = max(maxVal, val);
+        } else {
+            float alpha = val * 0.08;
+            accumColor += (1.0 - accumAlpha) * val * alpha;
+            accumAlpha += (1.0 - accumAlpha) * alpha;
+            if (accumAlpha > 0.95) break;
+        }
+    }
+    
+    float result = (uRenderMode == 0) ? maxVal : accumColor;
+    result *= uBrightness;
+    
+    fragColor = vec4(result, result, result, 1.0);
+}</script>
+
     <script>
-        const canvas = document.getElementById('canvas');
-        const gl = canvas.getContext('webgl2');
+    (function() {
+        var canvas = document.getElementById("canvas");
+        var gl = canvas.getContext("webgl2");
         
         if (!gl) {
-            alert('WebGL2 not supported');
+            document.getElementById("loading").textContent = "WebGL2 not supported";
+            return;
         }
 
-        let volumeTexture;
-        let program;
-        let vao;
-        let rotationX = 0.3;
-        let rotationY = 0;
-        let zoom = 2.0;
-        let autoRotate = true;
-        let renderMode = 0;
-        let brightness = 2.0;
-        let threshold = 0.02;
-        let volumeDims = {x: 820, y: 650, z: 100};
-        let aspectRatio = {x: 1.0, y: 0.793, z: 0.122};
-        let lastTime = performance.now();
-        let frameCount = 0;
+        var volumeTexture;
+        var program;
+        var vao;
+        var rotationX = 0.3;
+        var rotationY = 0;
+        var zoom = 2.0;
+        var autoRotate = true;
+        var renderMode = 0;
+        var brightness = 2.0;
+        var threshold = 0.02;
+        var volumeDims = {x: 820, y: 650, z: 100};
+        var aspectRatio = {x: 1.0, y: 0.793, z: 0.122};
+        var lastTime = performance.now();
+        var frameCount = 0;
 
-        const vsSource = `#version 300 es
-        in vec2 aPosition;
-        out vec2 vUV;
-        void main() {
-            vUV = aPosition * 0.5 + 0.5;
-            gl_Position = vec4(aPosition, 0.0, 1.0);
-        }`;
-
-        const fsSource = `#version 300 es
-        precision highp float;
-        precision highp sampler3D;
-        
-        in vec2 vUV;
-        out vec4 fragColor;
-        
-        uniform sampler3D uVolume;
-        uniform mat3 uRotation;
-        uniform float uZoom;
-        uniform float uBrightness;
-        uniform float uThreshold;
-        uniform int uRenderMode;
-        uniform vec3 uAspect;
-        uniform vec2 uResolution;
-        
-        const int MAX_STEPS = 512;
-        const float STEP_SIZE = 0.002;
-        
-        vec2 intersectAABB(vec3 rayOrigin, vec3 rayDir, vec3 boxMin, vec3 boxMax) {
-            vec3 tMin = (boxMin - rayOrigin) / rayDir;
-            vec3 tMax = (boxMax - rayOrigin) / rayDir;
-            vec3 t1 = min(tMin, tMax);
-            vec3 t2 = max(tMin, tMax);
-            float tNear = max(max(t1.x, t1.y), t1.z);
-            float tFar = min(min(t2.x, t2.y), t2.z);
-            return vec2(tNear, tFar);
-        }
-        
-        void main() {
-            vec2 uv = (vUV - 0.5) * 2.0;
-            uv.x *= uResolution.x / uResolution.y;
-            
-            vec3 rayOrigin = vec3(0.0, 0.0, uZoom);
-            vec3 rayDir = normalize(vec3(uv * 0.8, -1.0));
-            
-            rayOrigin = uRotation * rayOrigin;
-            rayDir = uRotation * rayDir;
-            
-            // Box with correct aspect ratio
-            vec3 boxMin = -uAspect * 0.5;
-            vec3 boxMax = uAspect * 0.5;
-            
-            vec2 tHit = intersectAABB(rayOrigin, rayDir, boxMin, boxMax);
-            
-            if (tHit.x > tHit.y || tHit.y < 0.0) {
-                fragColor = vec4(0.0, 0.0, 0.0, 1.0);
-                return;
-            }
-            
-            tHit.x = max(tHit.x, 0.0);
-            
-            float maxVal = 0.0;
-            float accumAlpha = 0.0;
-            float accumColor = 0.0;
-            
-            for (int i = 0; i < MAX_STEPS; i++) {
-                float t = tHit.x + float(i) * STEP_SIZE;
-                if (t > tHit.y) break;
-                
-                vec3 pos = rayOrigin + rayDir * t;
-                
-                // Convert world position to texture coordinates [0,1]
-                vec3 texCoord = (pos - boxMin) / (boxMax - boxMin);
-                
-                // Texture is stored as Z,Y,X in memory
-                // texImage3D was called with (X, Y, Z) = (820, 650, 100)
-                // So texture coords should be (x, y, z) directly
-                float val = texture(uVolume, texCoord).r;
-                
-                val = max(0.0, val - uThreshold);
-                
-                if (uRenderMode == 0) {
-                    // MIP
-                    maxVal = max(maxVal, val);
-                } else {
-                    // Alpha blending
-                    float alpha = val * 0.08;
-                    accumColor += (1.0 - accumAlpha) * val * alpha;
-                    accumAlpha += (1.0 - accumAlpha) * alpha;
-                    if (accumAlpha > 0.95) break;
-                }
-            }
-            
-            float result = (uRenderMode == 0) ? maxVal : accumColor;
-            result *= uBrightness;
-            
-            fragColor = vec4(result, result, result, 1.0);
-        }`;
-
-        function createShader(type, source) {
-            const shader = gl.createShader(type);
+        function createShader(type, sourceId) {
+            var source = document.getElementById(sourceId).textContent;
+            var shader = gl.createShader(type);
             gl.shaderSource(shader, source);
             gl.compileShader(shader);
             if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-                console.error('Shader error:', gl.getShaderInfoLog(shader));
+                console.error("Shader error:", gl.getShaderInfoLog(shader));
                 return null;
             }
             return shader;
         }
 
-        function createProgram(vs, fs) {
-            const prog = gl.createProgram();
+        function createProgram(vsId, fsId) {
+            var vs = createShader(gl.VERTEX_SHADER, vsId);
+            var fs = createShader(gl.FRAGMENT_SHADER, fsId);
+            var prog = gl.createProgram();
             gl.attachShader(prog, vs);
             gl.attachShader(prog, fs);
             gl.linkProgram(prog);
             if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
-                console.error('Program error:', gl.getProgramInfoLog(prog));
+                console.error("Program error:", gl.getProgramInfoLog(prog));
                 return null;
             }
             return prog;
         }
 
-        async function loadVolume() {
-            try {
-                const dimsResp = await fetch('volume_dims.json');
-                const dims = await dimsResp.json();
-                volumeDims = dims;
-                aspectRatio = {
-                    x: dims.aspect_x || 1.0,
-                    y: dims.aspect_y || 1.0,
-                    z: dims.aspect_z || 1.0
-                };
-                
-                console.log('Volume dimensions:', dims);
-                console.log('Aspect ratio:', aspectRatio);
-                document.getElementById('volSize').textContent = `${dims.z} × ${dims.y} × ${dims.x}`;
-                
-                const resp = await fetch('volume.raw');
-                const buffer = await resp.arrayBuffer();
-                const data = new Uint8Array(buffer);
-                
-                const expectedSize = dims.x * dims.y * dims.z;
-                console.log('Data size:', data.length, 'Expected:', expectedSize);
-                
-                if (data.length !== expectedSize) {
-                    console.error('Size mismatch!');
-                }
-                
-                // Check data range
-                let minVal = 255, maxVal = 0;
-                for (let i = 0; i < data.length; i++) {
-                    if (data[i] < minVal) minVal = data[i];
-                    if (data[i] > maxVal) maxVal = data[i];
-                }
-                console.log('Data range:', minVal, '-', maxVal);
-                
-                volumeTexture = gl.createTexture();
-                gl.bindTexture(gl.TEXTURE_3D, volumeTexture);
-                gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-                gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-                gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-                gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-                gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
-                
-                // Numpy array is Z,Y,X order (shape 100,650,820)
-                // Data in memory: X changes fastest, then Y, then Z
-                // WebGL texImage3D(width, height, depth) expects data in X,Y,Z order
-                // which matches our numpy layout (X fastest)
-                gl.texImage3D(
-                    gl.TEXTURE_3D, 0, gl.R8,
-                    dims.x, dims.y, dims.z,  // width=820, height=650, depth=100
-                    0, gl.RED, gl.UNSIGNED_BYTE, data
-                );
-                
-                console.log('Texture created successfully');
-                return true;
-            } catch (e) {
-                console.error('Load error:', e);
-                document.getElementById('loading').textContent = 'Error loading: ' + e.message;
-                return false;
-            }
+        function loadVolume() {
+            return fetch("volume_dims.json")
+                .then(function(resp) { return resp.json(); })
+                .then(function(dims) {
+                    volumeDims = dims;
+                    aspectRatio = {
+                        x: dims.aspect_x || 1.0,
+                        y: dims.aspect_y || 1.0,
+                        z: dims.aspect_z || 1.0
+                    };
+                    
+                    console.log("Volume dimensions:", dims);
+                    document.getElementById("volSize").textContent = dims.z + " x " + dims.y + " x " + dims.x;
+                    
+                    return fetch("volume.raw");
+                })
+                .then(function(resp) { return resp.arrayBuffer(); })
+                .then(function(buffer) {
+                    var data = new Uint8Array(buffer);
+                    var expectedSize = volumeDims.x * volumeDims.y * volumeDims.z;
+                    console.log("Data size:", data.length, "Expected:", expectedSize);
+                    
+                    var minVal = 255, maxVal = 0;
+                    for (var i = 0; i < data.length; i++) {
+                        if (data[i] < minVal) minVal = data[i];
+                        if (data[i] > maxVal) maxVal = data[i];
+                    }
+                    console.log("Data range:", minVal, "-", maxVal);
+                    
+                    volumeTexture = gl.createTexture();
+                    gl.bindTexture(gl.TEXTURE_3D, volumeTexture);
+                    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+                    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+                    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+                    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+                    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
+                    
+                    gl.texImage3D(
+                        gl.TEXTURE_3D, 0, gl.R8,
+                        volumeDims.x, volumeDims.y, volumeDims.z,
+                        0, gl.RED, gl.UNSIGNED_BYTE, data
+                    );
+                    
+                    console.log("Texture created");
+                    return true;
+                })
+                .catch(function(e) {
+                    console.error("Load error:", e);
+                    document.getElementById("loading").textContent = "Error: " + e.message;
+                    return false;
+                });
         }
 
         function init() {
-            const vs = createShader(gl.VERTEX_SHADER, vsSource);
-            const fs = createShader(gl.FRAGMENT_SHADER, fsSource);
-            program = createProgram(vs, fs);
+            program = createProgram("vs", "fs");
             
-            const positions = new Float32Array([-1,-1, 1,-1, -1,1, 1,1]);
+            var positions = new Float32Array([-1,-1, 1,-1, -1,1, 1,1]);
             
             vao = gl.createVertexArray();
             gl.bindVertexArray(vao);
             
-            const posBuffer = gl.createBuffer();
+            var posBuffer = gl.createBuffer();
             gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
             gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
             
-            const posLoc = gl.getAttribLocation(program, 'aPosition');
+            var posLoc = gl.getAttribLocation(program, "aPosition");
             gl.enableVertexAttribArray(posLoc);
             gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
         }
 
         function makeRotationMatrix(rx, ry) {
-            const cx = Math.cos(rx), sx = Math.sin(rx);
-            const cy = Math.cos(ry), sy = Math.sin(ry);
+            var cx = Math.cos(rx), sx = Math.sin(rx);
+            var cy = Math.cos(ry), sy = Math.sin(ry);
             return new Float32Array([
                 cy,      0,   sy,
                 sx*sy,   cx,  -sx*cy,
@@ -319,9 +305,9 @@
 
         function render() {
             frameCount++;
-            const now = performance.now();
+            var now = performance.now();
             if (now - lastTime >= 1000) {
-                document.getElementById('fps').textContent = frameCount;
+                document.getElementById("fps").textContent = frameCount;
                 frameCount = 0;
                 lastTime = now;
             }
@@ -342,37 +328,36 @@
             
             gl.activeTexture(gl.TEXTURE0);
             gl.bindTexture(gl.TEXTURE_3D, volumeTexture);
-            gl.uniform1i(gl.getUniformLocation(program, 'uVolume'), 0);
+            gl.uniform1i(gl.getUniformLocation(program, "uVolume"), 0);
             
-            gl.uniformMatrix3fv(gl.getUniformLocation(program, 'uRotation'), false, makeRotationMatrix(rotationX, rotationY));
-            gl.uniform1f(gl.getUniformLocation(program, 'uZoom'), zoom);
-            gl.uniform1f(gl.getUniformLocation(program, 'uBrightness'), brightness);
-            gl.uniform1f(gl.getUniformLocation(program, 'uThreshold'), threshold);
-            gl.uniform1i(gl.getUniformLocation(program, 'uRenderMode'), renderMode);
-            gl.uniform3f(gl.getUniformLocation(program, 'uAspect'), aspectRatio.x, aspectRatio.y, aspectRatio.z);
-            gl.uniform2f(gl.getUniformLocation(program, 'uResolution'), canvas.width, canvas.height);
+            gl.uniformMatrix3fv(gl.getUniformLocation(program, "uRotation"), false, makeRotationMatrix(rotationX, rotationY));
+            gl.uniform1f(gl.getUniformLocation(program, "uZoom"), zoom);
+            gl.uniform1f(gl.getUniformLocation(program, "uBrightness"), brightness);
+            gl.uniform1f(gl.getUniformLocation(program, "uThreshold"), threshold);
+            gl.uniform1i(gl.getUniformLocation(program, "uRenderMode"), renderMode);
+            gl.uniform3f(gl.getUniformLocation(program, "uAspect"), aspectRatio.x, aspectRatio.y, aspectRatio.z);
+            gl.uniform2f(gl.getUniformLocation(program, "uResolution"), canvas.width, canvas.height);
             
             gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
             
             requestAnimationFrame(render);
         }
 
-        // Mouse controls
-        let isDragging = false;
-        let lastMouseX, lastMouseY;
+        var isDragging = false;
+        var lastMouseX, lastMouseY;
 
-        canvas.addEventListener('mousedown', (e) => {
+        canvas.addEventListener("mousedown", function(e) {
             isDragging = true;
             lastMouseX = e.clientX;
             lastMouseY = e.clientY;
             autoRotate = false;
-            document.getElementById('rotateBtn').classList.remove('active');
+            document.getElementById("rotateBtn").classList.remove("active");
         });
 
-        canvas.addEventListener('mousemove', (e) => {
+        canvas.addEventListener("mousemove", function(e) {
             if (!isDragging) return;
-            const dx = e.clientX - lastMouseX;
-            const dy = e.clientY - lastMouseY;
+            var dx = e.clientX - lastMouseX;
+            var dy = e.clientY - lastMouseY;
             rotationY += dx * 0.01;
             rotationX += dy * 0.01;
             rotationX = Math.max(-Math.PI/2, Math.min(Math.PI/2, rotationX));
@@ -380,17 +365,16 @@
             lastMouseY = e.clientY;
         });
 
-        canvas.addEventListener('mouseup', () => isDragging = false);
-        canvas.addEventListener('mouseleave', () => isDragging = false);
+        canvas.addEventListener("mouseup", function() { isDragging = false; });
+        canvas.addEventListener("mouseleave", function() { isDragging = false; });
 
-        canvas.addEventListener('wheel', (e) => {
+        canvas.addEventListener("wheel", function(e) {
             e.preventDefault();
             zoom *= e.deltaY > 0 ? 1.1 : 0.9;
             zoom = Math.max(0.5, Math.min(5, zoom));
         });
 
-        // Touch controls
-        canvas.addEventListener('touchstart', (e) => {
+        canvas.addEventListener("touchstart", function(e) {
             if (e.touches.length === 1) {
                 isDragging = true;
                 lastMouseX = e.touches[0].clientX;
@@ -399,11 +383,11 @@
             }
         });
 
-        canvas.addEventListener('touchmove', (e) => {
+        canvas.addEventListener("touchmove", function(e) {
             e.preventDefault();
             if (isDragging && e.touches.length === 1) {
-                const dx = e.touches[0].clientX - lastMouseX;
-                const dy = e.touches[0].clientY - lastMouseY;
+                var dx = e.touches[0].clientX - lastMouseX;
+                var dy = e.touches[0].clientY - lastMouseY;
                 rotationY += dx * 0.01;
                 rotationX += dy * 0.01;
                 lastMouseX = e.touches[0].clientX;
@@ -411,49 +395,45 @@
             }
         });
 
-        canvas.addEventListener('touchend', () => isDragging = false);
+        canvas.addEventListener("touchend", function() { isDragging = false; });
 
-        // UI Controls
-        document.getElementById('brightness').addEventListener('input', (e) => {
+        document.getElementById("brightness").addEventListener("input", function(e) {
             brightness = parseFloat(e.target.value);
-            document.getElementById('brightnessVal').textContent = brightness.toFixed(1);
+            document.getElementById("brightnessVal").textContent = brightness.toFixed(1);
         });
 
-        document.getElementById('threshold').addEventListener('input', (e) => {
+        document.getElementById("threshold").addEventListener("input", function(e) {
             threshold = parseFloat(e.target.value);
-            document.getElementById('thresholdVal').textContent = threshold.toFixed(2);
+            document.getElementById("thresholdVal").textContent = threshold.toFixed(2);
         });
 
-        document.getElementById('mipBtn').addEventListener('click', () => {
+        document.getElementById("mipBtn").addEventListener("click", function() {
             renderMode = 0;
-            document.getElementById('mipBtn').classList.add('active');
-            document.getElementById('alphaBtn').classList.remove('active');
+            document.getElementById("mipBtn").classList.add("active");
+            document.getElementById("alphaBtn").classList.remove("active");
         });
 
-        document.getElementById('alphaBtn').addEventListener('click', () => {
+        document.getElementById("alphaBtn").addEventListener("click", function() {
             renderMode = 1;
-            document.getElementById('alphaBtn').classList.add('active');
-            document.getElementById('mipBtn').classList.remove('active');
+            document.getElementById("alphaBtn").classList.add("active");
+            document.getElementById("mipBtn").classList.remove("active");
         });
 
-        document.getElementById('rotateBtn').addEventListener('click', () => {
+        document.getElementById("rotateBtn").addEventListener("click", function() {
             autoRotate = !autoRotate;
-            document.getElementById('rotateBtn').classList.toggle('active', autoRotate);
+            document.getElementById("rotateBtn").classList.toggle("active", autoRotate);
         });
 
-        // Start
-        async function main() {
-            init();
-            const loaded = await loadVolume();
+        init();
+        loadVolume().then(function(loaded) {
             if (loaded) {
-                document.getElementById('loading').style.display = 'none';
-                document.getElementById('info').style.display = 'block';
-                document.getElementById('controls').style.display = 'block';
+                document.getElementById("loading").style.display = "none";
+                document.getElementById("info").style.display = "block";
+                document.getElementById("controls").style.display = "block";
                 render();
             }
-        }
-
-        main();
+        });
+    })();
     </script>
 </body>
 </html>
