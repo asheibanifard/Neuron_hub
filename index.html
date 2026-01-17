@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>3D Neuron Volume Renderer</title>
+    <title>3D Neuron Volume Renderer with LOD</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { 
@@ -48,6 +48,7 @@
         }
         #controls button:hover { background: #666; }
         #controls button.active { background: #0af; }
+        #controls button.skeleton-active { background: #f0a; }
         #loading {
             position: absolute;
             top: 50%;
@@ -57,6 +58,7 @@
             font-size: 18px;
         }
         .val { color: #0af; }
+        .btn-group { margin-bottom: 5px; }
     </style>
 </head>
 <body>
@@ -65,6 +67,9 @@
     <div id="info" style="display:none;">
         <h1>3D Neuron Volume Renderer</h1>
         <p>Volume: <span class="val" id="volSize">-</span></p>
+        <p>Mode: <span class="val" id="modeText">Reconstruction</span></p>
+        <p>Zoom: <span class="val" id="zoomLevel">1.0x</span></p>
+        <p>LOD: <span class="val" id="lodLevel">Full</span></p>
         <p>FPS: <span class="val" id="fps">-</span></p>
         <p style="margin-top: 10px;">Drag to rotate | Scroll to zoom</p>
     </div>
@@ -75,9 +80,28 @@
         <label>Threshold: <span id="thresholdVal">0.02</span></label>
         <input type="range" id="threshold" min="0" max="0.3" step="0.01" value="0.02">
         
+        <label>LOD Detail: <span id="lodDetailVal">1.0</span></label>
+        <input type="range" id="lodDetail" min="0.2" max="2.0" step="0.1" value="1.0">
+        
         <label>Render Mode</label>
-        <button id="mipBtn" class="active">MIP</button>
-        <button id="alphaBtn">Alpha</button>
+        <div class="btn-group">
+            <button id="mipBtn" class="active">MIP</button>
+            <button id="alphaBtn">Alpha</button>
+        </div>
+        
+        <label>Data Source</label>
+        <div class="btn-group">
+            <button id="recBtn" class="active">Recon</button>
+            <button id="gtBtn">GT</button>
+            <button id="diffBtn">Diff</button>
+            <button id="skelBtn">Skeleton</button>
+        </div>
+        
+        <label>LOD Mode</label>
+        <div class="btn-group">
+            <button id="lodAutoBtn" class="active">Auto</button>
+            <button id="lodOffBtn">Off</button>
+        </div>
         
         <label>Auto-Rotate</label>
         <button id="rotateBtn" class="active">On</button>
@@ -99,16 +123,20 @@ in vec2 vUV;
 out vec4 fragColor;
 
 uniform sampler3D uVolume;
+uniform sampler3D uVolumeGT;
+uniform sampler3D uVolumeSkeleton;
 uniform mat3 uRotation;
 uniform float uZoom;
 uniform float uBrightness;
 uniform float uThreshold;
 uniform int uRenderMode;
+uniform int uDataSource;
 uniform vec3 uAspect;
 uniform vec2 uResolution;
+uniform float uLODFactor;
+uniform int uLODEnabled;
 
 const int MAX_STEPS = 512;
-const float STEP_SIZE = 0.002;
 
 vec2 intersectAABB(vec3 rayOrigin, vec3 rayDir, vec3 boxMin, vec3 boxMax) {
     vec3 tMin = (boxMin - rayOrigin) / rayDir;
@@ -142,34 +170,96 @@ void main() {
     
     tHit.x = max(tHit.x, 0.0);
     
+    float baseStepSize = 0.002;
+    float stepSize = baseStepSize;
+    if (uLODEnabled == 1) {
+        float lodScale = clamp(uZoom / 2.0, 0.5, 2.0);
+        stepSize = baseStepSize * lodScale * uLODFactor;
+    }
+    
     float maxVal = 0.0;
     float accumAlpha = 0.0;
-    float accumColor = 0.0;
+    vec3 accumColor = vec3(0.0);
+    
+    int maxSteps = MAX_STEPS;
+    if (uLODEnabled == 1) {
+        float stepMultiplier = clamp(2.0 / uZoom, 0.5, 2.0);
+        maxSteps = int(float(MAX_STEPS) * stepMultiplier / uLODFactor);
+    }
     
     for (int i = 0; i < MAX_STEPS; i++) {
-        float t = tHit.x + float(i) * STEP_SIZE;
+        if (i >= maxSteps) break;
+        
+        float t = tHit.x + float(i) * stepSize;
         if (t > tHit.y) break;
         
         vec3 pos = rayOrigin + rayDir * t;
         vec3 texCoord = (pos - boxMin) / (boxMax - boxMin);
-        float val = texture(uVolume, texCoord).r;
         
-        val = max(0.0, val - uThreshold);
+        float valRec = texture(uVolume, texCoord).r;
+        float valGT = texture(uVolumeGT, texCoord).r;
+        float valSkel = texture(uVolumeSkeleton, texCoord).r;
+        
+        float adaptiveThreshold = uThreshold;
+        if (uLODEnabled == 1) {
+            adaptiveThreshold = uThreshold * clamp(uZoom / 2.0, 0.8, 1.5);
+        }
+        
+        float val;
+        vec3 color;
+        
+        if (uDataSource == 0) {
+            // Reconstruction - grayscale
+            val = max(0.0, valRec - adaptiveThreshold);
+            color = vec3(val);
+        } else if (uDataSource == 1) {
+            // Ground Truth - grayscale
+            val = max(0.0, valGT - adaptiveThreshold);
+            color = vec3(val);
+        } else if (uDataSource == 2) {
+            // Difference - orange
+            float absDiff = abs(valRec - valGT);
+            val = max(0.0, absDiff - adaptiveThreshold * 0.3);
+            color = vec3(val, val * 0.7, 0.0);
+        } else {
+            // Skeleton (3DGS) - magenta/pink
+            val = max(0.0, valSkel - adaptiveThreshold);
+            color = vec3(val, val * 0.3, val);
+        }
+        
+        float opacityBoost = 1.0;
+        if (uLODEnabled == 1 && stepSize > baseStepSize) {
+            opacityBoost = stepSize / baseStepSize;
+        }
         
         if (uRenderMode == 0) {
             maxVal = max(maxVal, val);
+            if (uDataSource == 3 && val > maxVal - 0.001) {
+                // Track color for skeleton MIP
+            }
         } else {
-            float alpha = val * 0.08;
-            accumColor += (1.0 - accumAlpha) * val * alpha;
+            float alpha = val * 0.08 * opacityBoost;
+            accumColor += (1.0 - accumAlpha) * color * alpha;
             accumAlpha += (1.0 - accumAlpha) * alpha;
             if (accumAlpha > 0.95) break;
         }
     }
     
-    float result = (uRenderMode == 0) ? maxVal : accumColor;
-    result *= uBrightness;
+    vec3 result;
+    if (uRenderMode == 0) {
+        if (uDataSource == 2) {
+            result = vec3(maxVal, maxVal * 0.7, 0.0) * uBrightness * 3.0;
+        } else if (uDataSource == 3) {
+            // Skeleton - magenta MIP
+            result = vec3(maxVal, maxVal * 0.3, maxVal) * uBrightness;
+        } else {
+            result = vec3(maxVal * uBrightness);
+        }
+    } else {
+        result = accumColor * uBrightness;
+    }
     
-    fragColor = vec4(result, result, result, 1.0);
+    fragColor = vec4(result, 1.0);
 }</script>
 
     <script>
@@ -182,7 +272,7 @@ void main() {
             return;
         }
 
-        var volumeTexture;
+        var volumeTexture, volumeTextureGT, volumeTextureSkeleton;
         var program;
         var vao;
         var rotationX = 0.3;
@@ -190,8 +280,11 @@ void main() {
         var zoom = 2.0;
         var autoRotate = true;
         var renderMode = 0;
+        var dataSource = 0;
         var brightness = 2.0;
         var threshold = 0.02;
+        var lodDetail = 1.0;
+        var lodEnabled = true;
         var volumeDims = {x: 820, y: 650, z: 100};
         var aspectRatio = {x: 1.0, y: 0.793, z: 0.122};
         var lastTime = performance.now();
@@ -223,7 +316,28 @@ void main() {
             return prog;
         }
 
-        function loadVolume() {
+        function loadTexture3D(url) {
+            return fetch(url)
+                .then(function(resp) { return resp.arrayBuffer(); })
+                .then(function(buffer) {
+                    var data = new Uint8Array(buffer);
+                    var tex = gl.createTexture();
+                    gl.bindTexture(gl.TEXTURE_3D, tex);
+                    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+                    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+                    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+                    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+                    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
+                    gl.texImage3D(
+                        gl.TEXTURE_3D, 0, gl.R8,
+                        volumeDims.x, volumeDims.y, volumeDims.z,
+                        0, gl.RED, gl.UNSIGNED_BYTE, data
+                    );
+                    return tex;
+                });
+        }
+
+        function loadVolumes() {
             return fetch("volume_dims.json")
                 .then(function(resp) { return resp.json(); })
                 .then(function(dims) {
@@ -237,36 +351,17 @@ void main() {
                     console.log("Volume dimensions:", dims);
                     document.getElementById("volSize").textContent = dims.z + " x " + dims.y + " x " + dims.x;
                     
-                    return fetch("volume.raw");
+                    return Promise.all([
+                        loadTexture3D("volume.raw"),
+                        loadTexture3D("volume_gt.raw"),
+                        loadTexture3D("volume_skeleton.raw")
+                    ]);
                 })
-                .then(function(resp) { return resp.arrayBuffer(); })
-                .then(function(buffer) {
-                    var data = new Uint8Array(buffer);
-                    var expectedSize = volumeDims.x * volumeDims.y * volumeDims.z;
-                    console.log("Data size:", data.length, "Expected:", expectedSize);
-                    
-                    var minVal = 255, maxVal = 0;
-                    for (var i = 0; i < data.length; i++) {
-                        if (data[i] < minVal) minVal = data[i];
-                        if (data[i] > maxVal) maxVal = data[i];
-                    }
-                    console.log("Data range:", minVal, "-", maxVal);
-                    
-                    volumeTexture = gl.createTexture();
-                    gl.bindTexture(gl.TEXTURE_3D, volumeTexture);
-                    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-                    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-                    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-                    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-                    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
-                    
-                    gl.texImage3D(
-                        gl.TEXTURE_3D, 0, gl.R8,
-                        volumeDims.x, volumeDims.y, volumeDims.z,
-                        0, gl.RED, gl.UNSIGNED_BYTE, data
-                    );
-                    
-                    console.log("Texture created");
+                .then(function(textures) {
+                    volumeTexture = textures[0];
+                    volumeTextureGT = textures[1];
+                    volumeTextureSkeleton = textures[2];
+                    console.log("All textures loaded (Recon, GT, Skeleton)");
                     return true;
                 })
                 .catch(function(e) {
@@ -302,6 +397,22 @@ void main() {
                 -cx*sy,  sx,  cx*cy
             ]);
         }
+        
+        function updateLODInfo() {
+            var zoomFactor = 2.0 / zoom;
+            document.getElementById("zoomLevel").textContent = zoomFactor.toFixed(1) + "x";
+            
+            var lodLevel = "Full";
+            if (lodEnabled) {
+                if (zoom > 3.0) lodLevel = "Low";
+                else if (zoom > 2.0) lodLevel = "Medium";
+                else if (zoom < 1.0) lodLevel = "High";
+                else lodLevel = "Full";
+            } else {
+                lodLevel = "Off";
+            }
+            document.getElementById("lodLevel").textContent = lodLevel;
+        }
 
         function render() {
             frameCount++;
@@ -330,15 +441,28 @@ void main() {
             gl.bindTexture(gl.TEXTURE_3D, volumeTexture);
             gl.uniform1i(gl.getUniformLocation(program, "uVolume"), 0);
             
+            gl.activeTexture(gl.TEXTURE1);
+            gl.bindTexture(gl.TEXTURE_3D, volumeTextureGT);
+            gl.uniform1i(gl.getUniformLocation(program, "uVolumeGT"), 1);
+            
+            gl.activeTexture(gl.TEXTURE2);
+            gl.bindTexture(gl.TEXTURE_3D, volumeTextureSkeleton);
+            gl.uniform1i(gl.getUniformLocation(program, "uVolumeSkeleton"), 2);
+            
             gl.uniformMatrix3fv(gl.getUniformLocation(program, "uRotation"), false, makeRotationMatrix(rotationX, rotationY));
             gl.uniform1f(gl.getUniformLocation(program, "uZoom"), zoom);
             gl.uniform1f(gl.getUniformLocation(program, "uBrightness"), brightness);
             gl.uniform1f(gl.getUniformLocation(program, "uThreshold"), threshold);
             gl.uniform1i(gl.getUniformLocation(program, "uRenderMode"), renderMode);
+            gl.uniform1i(gl.getUniformLocation(program, "uDataSource"), dataSource);
             gl.uniform3f(gl.getUniformLocation(program, "uAspect"), aspectRatio.x, aspectRatio.y, aspectRatio.z);
             gl.uniform2f(gl.getUniformLocation(program, "uResolution"), canvas.width, canvas.height);
+            gl.uniform1f(gl.getUniformLocation(program, "uLODFactor"), lodDetail);
+            gl.uniform1i(gl.getUniformLocation(program, "uLODEnabled"), lodEnabled ? 1 : 0);
             
             gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+            
+            updateLODInfo();
             
             requestAnimationFrame(render);
         }
@@ -371,7 +495,7 @@ void main() {
         canvas.addEventListener("wheel", function(e) {
             e.preventDefault();
             zoom *= e.deltaY > 0 ? 1.1 : 0.9;
-            zoom = Math.max(0.5, Math.min(5, zoom));
+            zoom = Math.max(0.3, Math.min(5, zoom));
         });
 
         canvas.addEventListener("touchstart", function(e) {
@@ -406,6 +530,11 @@ void main() {
             threshold = parseFloat(e.target.value);
             document.getElementById("thresholdVal").textContent = threshold.toFixed(2);
         });
+        
+        document.getElementById("lodDetail").addEventListener("input", function(e) {
+            lodDetail = parseFloat(e.target.value);
+            document.getElementById("lodDetailVal").textContent = lodDetail.toFixed(1);
+        });
 
         document.getElementById("mipBtn").addEventListener("click", function() {
             renderMode = 0;
@@ -419,13 +548,61 @@ void main() {
             document.getElementById("mipBtn").classList.remove("active");
         });
 
+        function clearDataSourceButtons() {
+            document.getElementById("recBtn").classList.remove("active");
+            document.getElementById("gtBtn").classList.remove("active");
+            document.getElementById("diffBtn").classList.remove("active");
+            document.getElementById("skelBtn").classList.remove("active");
+            document.getElementById("skelBtn").classList.remove("skeleton-active");
+        }
+
+        document.getElementById("recBtn").addEventListener("click", function() {
+            dataSource = 0;
+            clearDataSourceButtons();
+            document.getElementById("recBtn").classList.add("active");
+            document.getElementById("modeText").textContent = "Reconstruction";
+        });
+
+        document.getElementById("gtBtn").addEventListener("click", function() {
+            dataSource = 1;
+            clearDataSourceButtons();
+            document.getElementById("gtBtn").classList.add("active");
+            document.getElementById("modeText").textContent = "Ground Truth";
+        });
+
+        document.getElementById("diffBtn").addEventListener("click", function() {
+            dataSource = 2;
+            clearDataSourceButtons();
+            document.getElementById("diffBtn").classList.add("active");
+            document.getElementById("modeText").textContent = "Difference (|Rec - GT|)";
+        });
+
+        document.getElementById("skelBtn").addEventListener("click", function() {
+            dataSource = 3;
+            clearDataSourceButtons();
+            document.getElementById("skelBtn").classList.add("skeleton-active");
+            document.getElementById("modeText").textContent = "Skeleton (3DGS)";
+        });
+        
+        document.getElementById("lodAutoBtn").addEventListener("click", function() {
+            lodEnabled = true;
+            document.getElementById("lodAutoBtn").classList.add("active");
+            document.getElementById("lodOffBtn").classList.remove("active");
+        });
+        
+        document.getElementById("lodOffBtn").addEventListener("click", function() {
+            lodEnabled = false;
+            document.getElementById("lodOffBtn").classList.add("active");
+            document.getElementById("lodAutoBtn").classList.remove("active");
+        });
+
         document.getElementById("rotateBtn").addEventListener("click", function() {
             autoRotate = !autoRotate;
             document.getElementById("rotateBtn").classList.toggle("active", autoRotate);
         });
 
         init();
-        loadVolume().then(function(loaded) {
+        loadVolumes().then(function(loaded) {
             if (loaded) {
                 document.getElementById("loading").style.display = "none";
                 document.getElementById("info").style.display = "block";
